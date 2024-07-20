@@ -1,11 +1,11 @@
 import os
 import sys
+import requests
 import yt_dlp
 import tkinter as tk
 from tkinter import messagebox, filedialog
 from tkinter import ttk
 from PIL import Image, ImageTk
-import requests
 from io import BytesIO
 import threading
 import pyperclip
@@ -187,140 +187,128 @@ class YouTubeDownloaderApp:
                 return title, duration, thumbnail_url
         except Exception as e:
             print(f"Error in get_video_details: {e}")
-            return "Error", 0, ""
-
-    def update_thumbnail(self, thumbnail_url, thumbnail_label):
-        if thumbnail_url:
-            response = requests.get(thumbnail_url)
-            img_data = response.content
-            img = Image.open(BytesIO(img_data))
-            img = img.resize((160, 90))  # Resize to fit the label
-            img = ImageTk.PhotoImage(image=img)
-            thumbnail_label.config(image=img)
-            thumbnail_label.image = img
-            self.thumbnail_images[thumbnail_label] = img  # Keep a reference to avoid garbage collection
-        else:
-            thumbnail_label.config(image='', text='No Thumbnail')
-
-    def fetch_video_info(self, url):
-        title, duration, thumbnail_url = self.get_video_details(url)
-        return {
-            'title': title,
-            'duration': duration,
-            'thumbnail_url': thumbnail_url
-        }
+            return 'Unknown Title', 0, ''
 
     def update_video_details(self):
+        urls = self.url_listbox.get(0, tk.END)
         for widget in self.details_inner_frame.winfo_children():
             widget.destroy()
-        
-        for url in self.url_listbox.get(0, tk.END):
-            info = self.fetch_video_info(url)
-            
-            thumbnail_label = tk.Label(self.details_inner_frame)
-            thumbnail_label.pack(side=tk.LEFT, padx=10, pady=10)
-            self.update_thumbnail(info['thumbnail_url'], thumbnail_label)
 
-            video_info = tk.Label(self.details_inner_frame, text=f"Title: {info['title']}\nDuration: {info['duration']} seconds")
-            video_info.pack(side=tk.LEFT, padx=10, pady=10)
+        for url in urls:
+            title, duration, thumbnail_url = self.get_video_details(url)
+            title_label = tk.Label(self.details_inner_frame, text=f"Title: {title}")
+            title_label.pack()
+            duration_label = tk.Label(self.details_inner_frame, text=f"Duration: {duration} seconds")
+            duration_label.pack()
             
-            self.video_info_labels[url] = video_info
-            self.thumbnail_labels[url] = thumbnail_label
+            if thumbnail_url:
+                try:
+                    response = requests.get(thumbnail_url)
+                    image = Image.open(BytesIO(response.content))
+                    image = image.resize((120, 90), Image.ANTIALIAS)
+                    thumbnail_image = ImageTk.PhotoImage(image)
+                    
+                    thumbnail_label = tk.Label(self.details_inner_frame, image=thumbnail_image)
+                    thumbnail_label.image = thumbnail_image
+                    thumbnail_label.pack()
+                except Exception as e:
+                    print(f"Error loading thumbnail: {e}")
 
     def start_download(self):
-        self.progress_var.set("Starting download...")
-        self.progress_bar['value'] = 0
-        self.downloaded_urls = 0
-        self.total_urls = self.url_listbox.size()
-        self.notification_shown = False  # Reset the notification flag
+        self.status_var.set("กำลังดาวน์โหลด...")
+        self.status_label.update_idletasks()
         
-        if self.total_urls == 0:
-            messagebox.showwarning("Warning", "No URLs to download.")
+        urls = self.url_listbox.get(0, tk.END)
+        download_location = self.output_path_var.get()
+
+        if not download_location:
+            messagebox.showwarning("Warning", "Please select a download location.")
             return
-        
-        self.download_threads = []
-        for url in self.url_listbox.get(0, tk.END):
-            thread = threading.Thread(target=self.download_video, args=(url,))
+
+        self.total_urls = len(urls)
+        self.downloaded_urls = 0
+        self.progress_bar["value"] = 0
+        self.progress_bar["maximum"] = self.total_urls
+
+        for url in urls:
+            thread = threading.Thread(target=self._download_thread, args=(url, download_location))
             thread.start()
             self.download_threads.append(thread)
-        
-        # Start a thread to check download progress
-        progress_thread = threading.Thread(target=self.check_download_progress)
-        progress_thread.start()
 
-    def download_video(self, url):
-        output_path = self.output_path_var.get()
-        if not output_path:
-            output_path = '.'
-        
+        # Wait for all threads to complete
+        for thread in self.download_threads:
+            thread.join()
+
+        self.status_var.set("Download completed.")
+        self.root.after(0, self.clear_urls)
+
+    def _download_thread(self, url, download_location):
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(output_path, '%(title)s.%(ext)s'),
-            'quiet': False,
-            'progress_hooks': [self.progress_hook],
+            'outtmpl': os.path.join(download_location, '%(title)s.%(ext)s'),
+            'noplaylist': True,
+            'progress_hooks': [self.progress_hook]
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        
-        self.downloaded_urls += 1
-        if self.downloaded_urls == self.total_urls:
-            self.root.after(0, self.show_completion_notification)
+            try:
+                ydl.download([url])
+            except Exception as e:
+                print(f"Error in download_thread: {e}")
 
     def progress_hook(self, d):
         if d['status'] == 'finished':
-            file_size = d.get('total_bytes', 0)
-            downloaded = d.get('downloaded_bytes', 0)
-            progress = (downloaded / file_size) * 100 if file_size > 0 else 100
-            self.root.after(0, lambda: self.update_progress_bar(progress))
-    
-    def update_progress_bar(self, progress):
-        self.progress_bar['value'] = progress
-        self.progress_var.set(f"Progress: {progress:.2f}%")
-
-    def check_download_progress(self):
-        while any(thread.is_alive() for thread in self.download_threads):
-            self.root.update_idletasks()
-            self.root.after(100)
-        
-        if not self.notification_shown:
-            self.root.after(0, self.show_completion_notification)
-
-    def show_completion_notification(self):
-        if not self.notification_shown:
-            messagebox.showinfo("Completed", "ทำการโหลดครบหมดแล้ว")
-            self.clear_all()
-            self.notification_shown = True
-
-    def clear_all(self):
-        self.url_listbox.delete(0, tk.END)
-        self.result_var.set("")
-        self.progress_var.set("")
-        self.progress_bar['value'] = 0
-        self.clear_details()
-
-    def clear_details(self):
-        for widget in self.details_inner_frame.winfo_children():
-            widget.destroy()
+            self.downloaded_urls += 1
+            self.root.after(0, lambda: self.progress_bar.config(value=self.downloaded_urls))
+            self.root.after(0, lambda: self.progress_var.set(f"ดาวน์โหลด: {self.downloaded_urls}/{self.total_urls}"))
 
     def browse_folder(self):
         folder_selected = filedialog.askdirectory()
         if folder_selected:
             self.output_path_var.set(folder_selected)
 
-    def remove_selected_url(self):
-        selected_url_index = self.url_listbox.curselection()
-        if selected_url_index:
-            self.url_listbox.delete(selected_url_index[0])
-            self.update_video_details()
-
     def clear_urls(self):
         self.url_listbox.delete(0, tk.END)
-        self.clear_details()
+        self.details_inner_frame.destroy()
+        self.details_inner_frame = tk.Frame(self.details_canvas)
+        self.details_canvas.create_window((0, 0), window=self.details_inner_frame, anchor="nw")
+        self.details_inner_frame.bind("<Configure>", lambda e: self.details_canvas.configure(scrollregion=self.details_canvas.bbox("all")))
+
+    def remove_selected_url(self):
+        selected = self.url_listbox.curselection()
+        if selected:
+            self.url_listbox.delete(selected[0])
 
     def check_updates(self):
-        # Functionality for the update check will be implemented later
-        pass
+        repo_url = "https://api.github.com/repos/ThanathonTH/Weera-Program/releases/latest"
+        
+        try:
+            response = requests.get(repo_url)
+            response.raise_for_status()
+            latest_release = response.json()
+            latest_version = latest_release['tag_name']
+            download_url = latest_release['assets'][0]['browser_download_url']
+            
+            current_version = "v1.0"  # Replace with your current version
+            if latest_version != current_version:
+                if messagebox.askyesno("Update Available", f"มีการอัพเดทใหม่ ({latest_version}) คุณต้องการดาวน์โหลดและติดตั้งตอนนี้ไหม?"):
+                    self.download_update(download_url)
+            else:
+                messagebox.showinfo("Up to Date", "โปรแกรมของคุณเป็นเวอร์ชันล่าสุดแล้ว")
+        except requests.RequestException as e:
+            messagebox.showerror("Error", f"ไม่สามารถตรวจสอบการอัพเดทได้: {e}")
+
+    def download_update(self, download_url):
+        try:
+            response = requests.get(download_url, stream=True)
+            if response.status_code == 200:
+                with open("update.zip", "wb") as file:
+                    file.write(response.content)
+                messagebox.showinfo("Update Downloaded", "การดาวน์โหลดอัพเดทเสร็จสิ้น กรุณารีสตาร์ทโปรแกรมเพื่อทำการติดตั้ง")
+            else:
+                messagebox.showerror("Error", "ไม่สามารถดาวน์โหลดการอัพเดทได้")
+        except requests.RequestException as e:
+            messagebox.showerror("Error", f"ไม่สามารถดาวน์โหลดการอัพเดทได้: {e}")
 
 def main():
     root = tk.Tk()
